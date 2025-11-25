@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
+from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
@@ -148,20 +149,6 @@ class MultiModalCacheStats(BaseCacheStats):
     - `queries`: Refers to the number of multi-modal data items
       that were queried.
     """
-
-
-@dataclass
-class PerfStats:
-    num_flops: int = 0
-    num_read_bytes: int = 0
-    num_write_bytes: int = 0
-
-    def __add__(self, other: "PerfStats") -> "PerfStats":
-        return PerfStats(
-            self.num_flops + other.num_flops,
-            self.num_read_bytes + other.num_read_bytes,
-            self.num_write_bytes + other.num_write_bytes,
-        )
 
 
 @dataclass

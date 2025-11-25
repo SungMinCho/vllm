@@ -6,6 +6,7 @@ Analytic flops/memory estimation module for transformer components,
 to help derive MFU (Model Flops Utilization) stats for a running model.
 """
 
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -23,7 +24,6 @@ from vllm.utils.torch_utils import (
     get_kv_cache_torch_dtype,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.metrics.stats import PerfStats
 
 logger = init_logger(__name__)
 
@@ -38,6 +38,20 @@ class InvalidComponent(Exception):
 
 
 #### Basic Data Types ####
+
+
+@dataclass
+class PerfStats:
+    num_flops: int = 0
+    num_read_bytes: int = 0
+    num_write_bytes: int = 0
+
+    def __add__(self, other: "PerfStats") -> "PerfStats":
+        return PerfStats(
+            self.num_flops + other.num_flops,
+            self.num_read_bytes + other.num_read_bytes,
+            self.num_write_bytes + other.num_write_bytes,
+        )
 
 
 @dataclass(frozen=True)
@@ -941,6 +955,60 @@ class ModelMetrics:
             perf_stats += self.get_perf_stats(ctx, per_gpu)
 
         return perf_stats
+
+
+#### Logging ####
+
+
+class PerfMetricsLogging:
+    def __init__(self, vllm_config: VllmConfig):
+        # Disable for DP > 1 as it can be misleading
+        # (since all stats are "added" across engines, including per-GPU perf stats)
+        self.enabled = vllm_config.parallel_config.data_parallel_size == 1
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.reset()
+
+    def reset(self):
+        if not self.enabled:
+            return
+        self.total_num_flops_per_gpu: int = 0
+        self.total_read_bytes_per_gpu: int = 0
+        self.total_write_bytes_per_gpu: int = 0
+        self.last_log_time = time.monotonic()
+
+    def observe(self, perf_stats: PerfStats) -> None:
+        if not self.enabled:
+            return
+        self.total_num_flops_per_gpu += perf_stats.num_flops
+        self.total_read_bytes_per_gpu += perf_stats.num_read_bytes
+        self.total_write_bytes_per_gpu += perf_stats.num_write_bytes
+
+    def log(self, log_parts: list[str], log_args: list[int | float]):
+        if not (
+            self.enabled
+            and (
+                self.total_num_flops_per_gpu
+                or self.total_read_bytes_per_gpu
+                or self.total_write_bytes_per_gpu
+            )
+        ):
+            return
+
+        now = time.monotonic()
+        delta_time = now - self.last_log_time
+        delta_time_per_gpu = delta_time / self.pp_size
+
+        avg_tflops_per_gpu = self.total_num_flops_per_gpu / delta_time_per_gpu / 1e12
+        avg_gbps_per_gpu = (
+            (self.total_read_bytes_per_gpu + self.total_write_bytes_per_gpu)
+            / delta_time_per_gpu
+            / 1e9
+        )
+
+        log_parts.append("MFU: %.1f TF/s/GPU %.1f GB/s/GPU")
+        log_args.extend([avg_tflops_per_gpu, avg_gbps_per_gpu])
+
+        self.reset()
 
 
 ## util functions
