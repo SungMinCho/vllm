@@ -141,7 +141,18 @@ class ComponentMetrics(BaseModel, ABC):
 
     @classmethod
     @abstractmethod
-    def get_parser(cls) -> ParserChain: ...
+    def get_parser(cls) -> ParserChain:
+        """
+        Return a ParserChain that provides values for all required fields.
+
+        The returned parser chain must populate ParsedArgs with values for every
+        field defined on this ComponentMetrics class. Missing fields will cause
+        a ValidationError when from_vllm_config() is called.
+
+        See individual Parser docstrings for which args they provide, and field
+        comments on ComponentMetrics subclasses for which parser provides each field.
+        """
+        ...
 
     def __init_subclass__(cls):
         _COMPONENT_METRICS_REGISTRY[cls.component_type()] = cls
@@ -193,6 +204,13 @@ class ComponentMetrics(BaseModel, ABC):
 
 
 class BaseConfigParser(Parser):
+    """
+    Parses base model configuration.
+
+    Provides: vocab_size, hidden_size, num_attention_heads, num_hidden_layers,
+    weight_byte_size, activation_byte_size, dp_size, tp_size, pp_size, enable_ep
+    """
+
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         model_config = vllm_config.model_config
 
@@ -239,6 +257,12 @@ class BaseConfigParser(Parser):
 
 
 class BaseAttentionConfigParser(Parser):
+    """
+    Parses attention-specific configuration.
+
+    Provides: num_key_value_heads, head_dim, cache_byte_size
+    """
+
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         model_config = vllm_config.model_config
 
@@ -255,6 +279,12 @@ class BaseAttentionConfigParser(Parser):
 
 
 class AttentionQuantizationConfigParser(Parser):
+    """
+    Parses quantization configuration for attention layers.
+
+    Overrides: weight_byte_size
+    """
+
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         cfg = vllm_config.quant_config
 
@@ -275,17 +305,21 @@ class AttentionQuantizationConfigParser(Parser):
 
 
 class AttentionMetrics(ComponentMetrics):
+    # From BaseConfigParser
     num_hidden_layers: int = Field(..., gt=0)
     hidden_size: int = Field(..., gt=0)
     num_attention_heads: int = Field(..., gt=0)
-    num_key_value_heads: int = Field(..., gt=0)
-    head_dim: int = Field(..., gt=0)
-    weight_byte_size: int = Field(..., gt=0)
     activation_byte_size: int = Field(..., gt=0)
-    cache_byte_size: int = Field(..., gt=0)
-
     tp_size: int = Field(..., gt=0)
     pp_size: int = Field(..., gt=0)
+
+    # From BaseAttentionConfigParser
+    num_key_value_heads: int = Field(..., gt=0)
+    head_dim: int = Field(..., gt=0)
+    cache_byte_size: int = Field(..., gt=0)
+
+    # From BaseConfig Parser, overridden by AttentionQuantizationConfigParser
+    weight_byte_size: int = Field(..., gt=0)
 
     # TODO: discern cases where we have mixture of different attention layer types
     # such as SWA, MLA, etc.
@@ -399,6 +433,13 @@ class AttentionMetrics(ComponentMetrics):
 
 
 class BaseFfnConfigParser(Parser):
+    """
+    Parses FFN and MoE configuration.
+
+    Provides: intermediate_size, num_experts, num_experts_per_tok,
+    moe_intermediate_size, num_shared_experts, num_moe_layers
+    """
+
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         cfg = vllm_config.model_config.hf_config
         if hasattr(cfg, "text_config") and cfg.text_config is not None:
@@ -426,6 +467,12 @@ class BaseFfnConfigParser(Parser):
 
 
 class FfnParallelParser(Parser):
+    """
+    Parses FFN parallelism configuration.
+
+    Provides: ffn_tp_size, ffn_ep_size
+    """
+
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         # NOTE: ffn tp_size does not equal the tp_size parameter directly.
         # e.g.) If we use DP2TP4, ffn will use TP8 (or EP8 if EP is enabled.)
@@ -442,8 +489,9 @@ class FfnParallelParser(Parser):
 
 class InterleaveMoeLayerStepParser(Parser):
     """
-    Additionally parse interleave_moe_layer_step field (used in models like Llama4)
-    to adjust num_moe_layers.
+    Parses interleave_moe_layer_step field for models like Llama4.
+
+    Overrides: num_moe_layers
     """
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
@@ -468,8 +516,9 @@ class InterleaveMoeLayerStepParser(Parser):
 
 class MoeLayerFreqParser(Parser):
     """
-    Additionally parse moe_layer_freq field (and first_k_dense_replace field optionally)
-    (used in models like Deepseek) to adjust num_moe_layers.
+    Parses moe_layer_freq and first_k_dense_replace fields for models like Deepseek.
+
+    Overrides: num_moe_layers
     """
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
@@ -491,6 +540,12 @@ class MoeLayerFreqParser(Parser):
 
 
 class FfnQuantizationConfigParser(Parser):
+    """
+    Parses quantization configuration for FFN layers.
+
+    Overrides: weight_byte_size
+    """
+
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         cfg = vllm_config.quant_config
 
@@ -516,25 +571,34 @@ class FfnQuantizationConfigParser(Parser):
 
 
 class FfnMetrics(ComponentMetrics):
+    # From BaseConfigParser
     num_hidden_layers: int = Field(..., gt=0)
     hidden_size: int = Field(..., gt=0)
+    activation_byte_size: int = Field(..., gt=0)
+    pp_size: int = Field(..., gt=0)
+
+    # From FfnParallelParser
+    ffn_tp_size: int = Field(..., gt=0)
+    ffn_ep_size: int = Field(..., gt=0)
+
+    # From BaseFfnConfigParser
     intermediate_size: int = Field(..., gt=0)
-    num_moe_layers: int = Field(..., ge=0)
     num_experts: int = Field(0)
     num_experts_per_tok: int = Field(1)
     moe_intermediate_size: int = Field(0)
     num_shared_experts: int = Field(0)
+
+    # From BaseConfigParser, can be overridden InterleaveMoeLayerStep or MoeLayerFreq
+    num_moe_layers: int = Field(..., ge=0)
+
     # FIXME: might have to make this more granular
     # (i.e. dense_weight_byte_size, moe_routed_weight_byte_size,
     # moe_shared_weight_byte_size)
     # since it can differ from byte size of other components (e.g. attn)
     # and can differ even from each other.
-    weight_byte_size: int | float = Field(..., gt=0)
-    activation_byte_size: int = Field(..., gt=0)
 
-    ffn_tp_size: int = Field(..., gt=0)
-    ffn_ep_size: int = Field(..., gt=0)
-    pp_size: int = Field(..., gt=0)
+    # From BaseConfigParser, can be overridden by FfnQuantizationConfigParser
+    weight_byte_size: int | float = Field(..., gt=0)
 
     @model_validator(mode="after")
     def validate_moe_fields(self) -> Self:
@@ -746,11 +810,11 @@ class FfnMetrics(ComponentMetrics):
 
 
 class UnembedMetrics(ComponentMetrics):
+    # From BaseConfigParser
     hidden_size: int = Field(..., gt=0)
     vocab_size: int = Field(..., gt=0)
     weight_byte_size: int = Field(..., gt=0)
     activation_byte_size: int = Field(..., gt=0)
-
     tp_size: int
 
     @classmethod
